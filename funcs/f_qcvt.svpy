@@ -1,0 +1,46 @@
+    // fixed point Q format converter - shift, round, saturate from one Q format to another
+//; from vexpr import decl, lit, sext
+//; import qfmt
+//; h          = self.include_params
+//; func_name  = h.get('func_name', 'f_qcvt')
+//; q_in       = h.get('q_in',  'Q4.4')
+//; q_out      = h.get('q_out', 'Q2.2')
+//; round_mode = h.get('round_mode', 'trunc')
+//; osym       = h.get('osym', 0)
+//; lifetime   = h.get('lifetime', 'static')
+//; def q_or_error(fn, *args):
+//;     try:
+//;         return fn(*args)
+//;     except qfmt.QError as e:
+//;         error(f"{func_name}: {e}")
+//; # enddef
+//; f_in     = q_or_error(qfmt.parse, q_in)
+//; f_out    = q_or_error(qfmt.parse, q_out)
+//; rq       = q_or_error(qfmt.requant, f_in, f_out, round_mode, bool(osym))
+//; iwidth   = f_in.width
+//; owidth   = f_out.width
+//; shift    = rq.shift
+//; acc_w    = max(iwidth + abs(shift) + 2, owidth + (0 if f_out.signed else 1))
+    // `func_name`: `q_in` -> `q_out`, round=`round_mode`, saturating`", output symmetric" if osym else ""`
+    function `lifetime` `decl(f_out, pad=False)` `func_name`;
+        input `decl(f_in, pad=False)` x;
+        reg signed [`acc_w-1`:0] xs, acc;
+        begin
+            xs = `sext('x', iwidth, acc_w, msb=f_in.int_bits-1, signed=f_in.signed)`;
+//; if shift > 0:
+            acc = (xs + `lit(rq.add_c, acc_w)`) >>> `shift`;
+//;     if round_mode == 'half_even':
+            // a tie landed on an odd result, so step down to the even one
+            if ( (xs & `lit(rq.tie_mask, acc_w)`) == `lit(rq.tie_val, acc_w)` && acc[0] ) acc = acc - 1'b1;
+//;     # endif
+//; elif shift < 0:
+            acc = xs <<< `-shift`;
+//; else:
+            acc = xs;
+//; # endif
+            if      ( acc > `lit(rq.max_code, acc_w)` ) acc = `lit(rq.max_code, acc_w)`;
+            else if ( acc < `lit(rq.min_code, acc_w)` ) acc = `lit(rq.min_code, acc_w)`;
+            `func_name` = acc[`owidth-1`:0];
+        end
+    endfunction
+//; _d = getattr(self, func_name, {}); _d['iwidth'] = iwidth; _d['owidth'] = owidth; setattr(self, func_name, _d)
