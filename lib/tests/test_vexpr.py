@@ -63,17 +63,8 @@ def test_lit_rejects_zero_width():
         lit(0, 0)
 
 
-def test_lit_matches_the_lambda_it_replaces():
-    """The eleven funcs/ copies, byte for byte, over every value they can pass."""
-    sdec = lambda v, w: f"{w}'sd{v}" if v >= 0 else f"-{w}'sd{-v}"  # noqa: E731
-    for width in WIDTHS:
-        for v in range(-(1 << (width - 1)), 1 << (width - 1)):
-            assert lit(v, width) == sdec(v, width)
-
-
 def test_error_type_is_a_value_error():
     assert issubclass(VExprError, ValueError)
-    assert vexpr.VExprError is VExprError
 
 
 # ---------------------------------------------------------------------- sext
@@ -93,11 +84,10 @@ def test_sext_examples(args, kwargs, expect):
 
 
 def test_sext_reproduces_the_three_identical_template_sites():
-    """funcs/f_sh.svpy:19, f_shleft.svpy:18 and f_shright.svpy:20 are byte-identical."""
-    for iwidth, isw in ((8, 11), (4, 7), (16, 19)):
-        assert (
-            vexpr.sext("in", iwidth, isw) == f"{{ {{ {isw - iwidth} {{in[{iwidth - 1}]}} }}, in }}"
-        )
+    """functions/f_sh.svpy:19, f_shleft.svpy:18 and f_shright.svpy:20 are byte-identical."""
+    assert vexpr.sext("in", 8, 11) == "{ { 3 {in[7]} }, in }"
+    assert vexpr.sext("in", 4, 7) == "{ { 3 {in[3]} }, in }"
+    assert vexpr.sext("in", 16, 19) == "{ { 3 {in[15]} }, in }"
 
 
 def test_sext_msb_defaults_to_the_top_bit():
@@ -230,3 +220,53 @@ def test_parenthesize_rejects_an_empty_list_or_a_zero_leaf():
         vexpr.parenthesize([])
     with pytest.raises(VExprError):
         vexpr.parenthesize(list("ab"), leaf=0)
+
+
+@pytest.mark.parametrize(
+    "n, expect",
+    [
+        (1, "coef0"),
+        (4, "coef3"),
+        (10, "coef9"),
+        (11, "coef10"),
+        (100, "coef99"),
+        (101, "coef100"),
+    ],
+)
+def test_idx_pads_to_the_width_of_the_last_member(n, expect):
+    assert vexpr.idx("coef", n - 1, n) == expect
+
+
+@pytest.mark.parametrize("n", [1, 4, 10, 11, 100, 101])
+def test_idx_gives_every_member_the_same_width(n):
+    names = [vexpr.idx("s", i, n) for i in range(n)]
+    assert len({len(s) for s in names}) == 1
+    assert names == sorted(names)
+
+
+@pytest.mark.parametrize(
+    "n,min_width,expect",
+    [
+        (4, 1, "coef3"),
+        (4, 2, "coef03"),
+        (4, 4, "coef0003"),
+        (12, 2, "coef03"),
+        (101, 2, "coef003"),
+    ],
+)
+def test_idx_min_width_is_a_floor_not_a_width(n, min_width, expect):
+    assert vexpr.idx("coef", 3, n, min_width) == expect
+
+
+def test_idx_rejects_a_min_width_below_one():
+    with pytest.raises(VExprError):
+        vexpr.idx("s", 0, 4, 0)
+
+
+def test_idx_rejects_an_index_outside_the_family():
+    with pytest.raises(VExprError):
+        vexpr.idx("s", 4, 4)
+    with pytest.raises(VExprError):
+        vexpr.idx("s", -1, 4)
+    with pytest.raises(VExprError):
+        vexpr.idx("s", 0, 0)

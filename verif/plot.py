@@ -60,11 +60,19 @@ class DataFile:
     def series(
         self, keep: dict[str, int] | None = None
     ) -> "OrderedDict[tuple[int, ...], list[list[int]]]":
-        """Group rows by the values of the leading key columns, preserving file order."""
+        """Group rows by the values of the leading key columns, preserving file order.
+
+        A name that is not a key column is an error: dropping it silently would plot the
+        whole file, which looks like a result rather than a typo.
+        """
         nkeys = len(self.keys)
-        wanted = {
-            self.keys.index(n): v for n, v in (keep or {}).items() if n in self.keys
-        }
+        unknown = sorted(n for n in (keep or {}) if n not in self.keys)
+        if unknown:
+            raise DataError(
+                f"{self.path}: --key names no column: {', '.join(unknown)}; "
+                f"keys are {self.keys}"
+            )
+        wanted = {self.keys.index(n): v for n, v in (keep or {}).items()}
         out: OrderedDict[tuple[int, ...], list[list[int]]] = OrderedDict()
         for row in self.rows:
             key = tuple(row[:nkeys])
@@ -149,19 +157,21 @@ def main() -> int:
     keep = {}
     for item in args.key:
         name, _, value = item.partition("=")
-        if not value.lstrip("-").isdigit():
+        try:
+            keep[name] = int(value)
+        except ValueError:
             print(f"error: --key wants NAME=INTEGER, got {item!r}", file=sys.stderr)
             return 2
-        keep[name] = int(value)
 
     if args.out:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.backends import BackendFilter, backend_registry
 
     # With no display matplotlib quietly falls back to a file-only backend, and plt.show()
     # then does nothing at all. Say so rather than appearing to have drawn something.
     if not args.out:
-        interactive = {b.lower() for b in matplotlib.rcsetup.interactive_bk}
+        interactive = {b.lower() for b in backend_registry.list_builtin(BackendFilter.INTERACTIVE)}
         if matplotlib.get_backend().lower() not in interactive:
             print(
                 f"error: no interactive display (backend is "

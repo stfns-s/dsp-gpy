@@ -112,7 +112,7 @@ module `mname`;
     endfunction
 
     function longint signed ref_out;
-        ref_out = fdiv(ref_accum, `ASCL`);
+        ref_out = fdiv(ref_accum, `lit(ASCL, 64)`);
     endfunction
 
     // one clock of the intended behaviour. The sum is exact, so an RTL sum too narrow to
@@ -128,23 +128,24 @@ module `mname`;
 //; # endif
             if (negb) v = ref_negate(insym, `IW`, 1'b1);
             else      v = insym;
-            fb  = v * `1 << (AW-IW)`;
+            fb  = v * `lit(1 << (AW-IW), 64)`;
             ifb = fdiv(fb, 64'sd1 << m);
 
-            top = fdiv(ref_accum, `1 << (AW-LW)`);
-            if (lke) ilkfb = fdiv(ref_negate(top, `LW`, 1'b0) * `1 << (AW-LW)`, 64'sd1 << lm);
+            top = fdiv(ref_accum, `lit(1 << (AW-LW), 64)`);
+            if (lke) ilkfb = fdiv(ref_negate(top, `LW`, 1'b0) * `lit(1 << (AW-LW), 64)`,
+                                  64'sd1 << lm);
             else     ilkfb = 0;
 
             sum = ref_accum + ifb + ilkfb;
-            if      (sum > `ACAP`) nxt = `AMAX`;
-            else if (sum < `AFLR`) nxt = `AMIN`;
+            if      (sum > `lit(ACAP, 64)`) nxt = `lit(AMAX, 64)`;
+            else if (sum < `lit(AFLR, 64)`) nxt = `lit(AMIN, 64)`;
             else                   nxt = sum;
 
-            if (ldb) nxt = ld_v * `ASCL`;
+            if (ldb) nxt = ld_v * `lit(ASCL, 64)`;
 
-            onxt = fdiv(nxt, `ASCL`);
-            if (lim_v != 0 && onxt < -lim_v) nxt = (-lim_v) * `ASCL`;
-            if (lim_v != 0 && onxt >  lim_v) nxt = lim_v * `ASCL`;
+            onxt = fdiv(nxt, `lit(ASCL, 64)`);
+            if (lim_v != 0 && onxt < -lim_v) nxt = (-lim_v) * `lit(ASCL, 64)`;
+            if (lim_v != 0 && onxt >  lim_v) nxt = lim_v * `lit(ASCL, 64)`;
 
             if (ldb || enb) ref_accum = nxt;
         end

@@ -27,7 +27,7 @@
             udf =  udf | in[`iwidth-1`] & ( inx[`iwidth-1`:0] == `lit(shl_minn, iwidth)` );
 //; # endif
 
-            case ( {ovf, udf} ) // synthesis parallel_case full_case
+            case ( {ovf, udf} )
                 2'b10:   `func_name` = `lit(shl_max, iwidth)`;
                 2'b01:   `func_name` = `lit(shl_minn, iwidth)`;
                 default: `func_name` = inx[`iwidth-1`:0];

@@ -4,3 +4,7 @@ genesispy.log
 .pytest_cache/
 genesis_raw/
 tmp/
+z.tmp/
+*.vcd
+*.fst
+*.vvp

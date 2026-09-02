@@ -86,8 +86,7 @@ def decl(what: object, signed: bool | None = None, pad: bool = True) -> str:
     a port says "input". Callers keep their own prefix.
 
     With pad set, the unsigned form is blanked to the width of "signed" so the
-    ranges line up in a column of declarations. That is bookkeeping every caller
-    currently does by hand, in five mutually incompatible spellings.
+    ranges line up in a column of declarations.
 
     `what` is a width in bits, or any object exposing int_bits/frac/signed -- a
     qfmt.Fmt -- whose range carries the binary point.
@@ -106,6 +105,29 @@ def decl(what: object, signed: bool | None = None, pad: bool = True) -> str:
     if signed:
         return f"signed [{hi}:{lo}]"
     return f"       [{hi}:{lo}]" if pad else f"[{hi}:{lo}]"
+
+
+def idx(base: str, i: int, n: int, min_width: int = 1) -> str:
+    """A numbered name from a family of n, zero-padded so the family sorts.
+
+        idx("coef", 3, 4)        -> "coef3"
+        idx("coef", 3, 12)       -> "coef03"
+        idx("coef", 3, 101)      -> "coef003"
+        idx("coef", 3, 4, 2)     -> "coef03"
+
+    The width comes from the family's total, not from the index, so every member
+    of one family has the same width and a parent that connects by name builds the
+    same string. min_width holds a small family to a wider name, for a module whose
+    port names should not change shape with the family size; a family that needs
+    more digits than that still gets them.
+    """
+    if n < 1:
+        raise VExprError(f"idx: family size must be at least 1, got {n}")
+    if not 0 <= i < n:
+        raise VExprError(f"idx: index {i} outside 0 .. {n - 1}")
+    if min_width < 1:
+        raise VExprError(f"idx: min_width must be at least 1, got {min_width}")
+    return f"{base}{i:0{max(len(str(n - 1)), min_width)}d}"
 
 
 def parenthesize(terms: list[str], op: str = " + ", leaf: int = 2) -> str:

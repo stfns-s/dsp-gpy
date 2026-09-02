@@ -1,0 +1,28 @@
+//; IW  = parameter('IW', 8)   # input width
+//; MIN = -(1 << (IW-1))
+//; CFG = f"{mname} IW={IW}"
+// unit test for f_sym
+module `mname`;
+
+//; self.include_params = {'func_name': 'dut', 'iwidth': IW}
+//; include('f_sym.svpy')
+//; include('tb_util.svpy')
+
+    logic signed [`IW-1`:0] x, y;
+    longint signed          xs, exp;
+
+    initial begin
+        tb_data_open("`CFG`", "x,y,exp");
+        for (int i = 0; i < `1 << IW`; i++) begin
+            x   = i[`IW-1`:0];
+            xs  = longint'(x);
+            y   = dut(x);
+            // f_sym tests for the most negative code and substitutes; the clamp does not
+            exp = clamp(xs, `MIN+1`, `-MIN-1`);
+            tb_check(64'(y), exp, $sformatf("x=%0d", xs));
+            tb_data_row($sformatf("%0d,%0d,%0d", xs, y, exp));
+        end
+        tb_report("`CFG`");
+        $finish;
+    end
+endmodule

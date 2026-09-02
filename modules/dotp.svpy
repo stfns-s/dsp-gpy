@@ -1,0 +1,458 @@
+//; # Fixed-point dot product of N_TAPS samples and N_TAPS coefficients:
+//; #     result = requant(sum(coef[i] * trim(sample[i])))
+//; # Each sample is trimmed, multiplied by its coefficient, the products requantized to one
+//; # binary point, summed in groups, the total requantized into the output format.
+//; # Every tap has a bit of tap_en. Where the tap is registered the bit gates that tap's
+//; # clock, so a disabled tap holds its last product; where it is not, the bit zeroes the
+//; # sample instead. PIPE names the stages that carry a register.
+//; # Rounding modes: trunc, half_up, half_even, half_away, to_zero.
+//; import textwrap
+//; from dataclasses import dataclass
+//; import partition
+//; import qfmt
+//; from vexpr import decl, idx, lit, pad_low, parenthesize
+//;
+//; #
+//; # parameters: (scalar or list) takes one value or a list of N_TAPS.
+//; N_TAPS        = parameter('N_TAPS',        8)          # number of taps
+//; Q_SMPL        = parameter('Q_SMPL',        'Q1.5')     # sample format, shared by every tap
+//; Q_TRMSMPL     = parameter('Q_TRMSMPL',                 # trimmed sample format (scalar or list)
+//;     ['Q1.4', 'Q1.5', 'Q1.5', 'Q1.5', 'Q1.5', 'Q1.5', 'Q1.4', 'Q1.4'])
+//; TRMSMPL_ROUND = parameter('TRMSMPL_ROUND', 'half_up')  # rounding mode of the sample trim
+//; TRMSMPL_SYM   = parameter('TRMSMPL_SYM',   0)          # symmetric clamp on the sample trim: 0/1
+//; ISYM_SMPL     = parameter('ISYM_SMPL',     1)          # samples never take their min code: 0/1
+//; Q_COEF        = parameter('Q_COEF',                    # coefficient format (scalar or list)
+//;     ['Q2.5', 'Q4.5', 'Q6.5', 'Q6.5', 'Q6.5', 'Q4.5', 'Q2.5', 'Q1.5'])
+//; ISYM_COEF     = parameter('ISYM_COEF',     1)          # coefficients never take min code: 0/1
+//; PROD_FRAC     = parameter('PROD_FRAC',     None)       # product frac bits; None derives it
+//; PROD_ROUND    = parameter('PROD_ROUND',    'trunc')    # rounding mode of the product requant
+//; N_GROUPS      = parameter('N_GROUPS',      2)          # number of groups: 1 .. N_TAPS
+//; TAP_GROUPS    = parameter('TAP_GROUPS',    None)       # (scalar or list) group index, or None
+//; PARENTH       = parameter('PARENTH',       1)          # balance the adder trees: 0/1
+//; Q_RESULT      = parameter('Q_RESULT',      'Q6.5')     # output format
+//; RESULT_ROUND  = parameter('RESULT_ROUND',  'half_up')  # rounding mode of the output requant
+//; RESULT_SYM    = parameter('RESULT_SYM',    1)          # symmetric clamp on the output: 0/1
+//; PIPE          = parameter('PIPE',                      # registered stages: trmsmpl, prod,
+//;     ['prod', 'groups'])                                #   groups, result -- or 'none'
+//;
+//; # Indexed name minimum width
+//; IDX_W = 2
+//; #
+//; # records: per-tap and per-net state, filled in as the build proceeds
+//; @dataclass
+//; class Tap:
+//;     index:       int                  # tap number; names its ports and nets
+//;     trmsmpl_fmt: qfmt.Fmt             # Q_TRMSMPL[index]
+//;     coef_fmt:    qfmt.Fmt             # Q_COEF[index]
+//;     trim:        qfmt.Requant = None  # sample -> qsample
+//;     prod_bounds: qfmt.Bounds = None   # exact product range
+//;     prod_rq:     qfmt.Requant = None  # prod -> qprod; its dst is Q_PROD[index]
+//;     group:       int = None
+//; # endclass
+//;
+//; #
+//; # helpers: small utilities, the leaf-function collector and the net table
+//; def derive(fn, *args, **kw):
+//;     try:
+//;         return fn(*args, **kw)
+//;     except (qfmt.QError, partition.PartitionError) as e:
+//;         error(f"{mname}: {e}")
+//; # enddef
+//;
+//; def broadcast(name, v):
+//;     vs = list(v) if isinstance(v, (list, tuple)) else [v]
+//;     if len(vs) == 1:
+//;         vs = vs * N_TAPS
+//;     # endif
+//;     if len(vs) != N_TAPS:
+//;         error(f"{mname}: {name} has {len(vs)} entries; want 1 or N_TAPS={N_TAPS}")
+//;     # endif
+//;     return vs
+//; # enddef
+//;
+//; # PIPE names the stages that carry a register, in any order; 'none' or an empty list
+//; # is none of them. A sweep spells the list with commas, and -p carries a scalar, so the
+//; # value can arrive as one string.
+//; STAGES = ('trmsmpl', 'prod', 'groups', 'result')
+//; def pipe_stages(v):
+//;     names = list(v) if isinstance(v, (list, tuple)) else str(v).split(',')
+//;     names = [n for n in (str(x).strip() for x in names) if n]
+//;     if names == ['none']:
+//;         names = []
+//;     # endif
+//;     for n in names:
+//;         if n not in STAGES:
+//;             error(f"{mname}: PIPE names {n!r}; each stage must be one of "
+//;                 f"{', '.join(STAGES)}, or the whole list 'none'")
+//;         # endif
+//;         if names.count(n) > 1:
+//;             error(f"{mname}: PIPE names {n!r} more than once")
+//;         # endif
+//;     # endfor
+//;     return [n for n in STAGES if n in names]
+//; # enddef
+//;
+//; def qname(f):
+//;     return f.to_q().lower().replace('-', 'm').replace('.', '_')
+//; # enddef
+//;
+//; def tap_note(t):
+//;     return (f"coef {t.coef_fmt}, qsample {t.trmsmpl_fmt}, prod {t.prod_bounds.fmt()}, "
+//;         f"qprod {t.prod_rq.dst}")
+//; # enddef
+//;
+//; def sample_elem(i):
+//;     return 'sample' if N_TAPS == 1 else f'sample[{i}]'
+//; # enddef
+//;
+//; # Helper functions are collected while the datapath is built and emitted once each at the
+//; # end of the module, keyed by everything that shapes their body.
+//; funcs = {}
+//; def collect(leaf, key, name, order, params, user):
+//;     if key not in funcs:
+//;         taken = {f['name'] for f in funcs.values()}
+//;         base, k = name, 0
+//;         while name in taken:
+//;             k += 1
+//;             name = f'{base}_{k}'
+//;         # endwhile
+//;         funcs[key] = {'leaf': leaf, 'name': name, 'order': (*order, len(funcs)),
+//;             'params': params, 'users': []}
+//;     # endif
+//;     if user not in funcs[key]['users']:
+//;         funcs[key]['users'].append(user)
+//;     # endif
+//;     return funcs[key]['name']
+//; # enddef
+//;
+//; def qcvt(role, rq, saturate, user):
+//;     b = rq.src_bounds
+//;     key = ('f_qcvt', rq.src.to_q(), rq.dst.to_q(), rq.mode, rq.osym, b.lo, b.hi, saturate)
+//;     params = {'q_in': rq.src.to_q(), 'q_out': rq.dst.to_q(), 'round_mode': rq.mode,
+//;         'osym': int(rq.osym), 'src_lo': b.lo, 'src_hi': b.hi, 'saturate': int(saturate),
+//;         'lifetime': 'automatic'}
+//;     order = ({'trim': 0, 'prod': 1, 'out': 2}[role],)
+//;     return collect('f_qcvt.svpy', key, f'f_{role}_{qname(rq.src)}__{qname(rq.dst)}', order,
+//;         params, user)
+//; # enddef
+//;
+//; def sx(term, iwidth, owidth, user):
+//;     if owidth == iwidth:
+//;         return term
+//;     # endif
+//;     params = {'iwidth': iwidth, 'owidth': owidth, 'lifetime': 'automatic'}
+//;     name = collect('f_sx.svpy', ('f_sx', iwidth, owidth), f'f_sx_{iwidth}__{owidth}',
+//;         (3, iwidth, owidth), params, user)
+//;     return f'{name}({term})'
+//; # enddef
+//;
+//; # A sum longer than the line is broken after a '+', continuation lines under the first term
+//; def wrap_expr(expr, indent, width=100):
+//;     parts = expr.split(' + ')
+//;     lines, cur = [], parts[0]
+//;     for part in parts[1:]:
+//;         if indent + len(cur) + len(part) + 4 > width:
+//;             lines.append(cur + ' +')
+//;             cur = part
+//;         else:
+//;             cur = f'{cur} + {part}'
+//;         # endif
+//;     # endfor
+//;     return lines + [cur]
+//; # enddef
+//;
+//; def sum_lines(head, expr):
+//;     # The statement head is a string because wrap_expr needs its width to indent the
+//;     # continuation lines under the first term.
+//;     lines = wrap_expr(expr, len(head))
+//;     pad   = ' ' * len(head)
+//;     return [head + lines[0]] + [pad + line for line in lines[1:]]
+//; # enddef
+//;
+//; def summed(terms):
+//;     return parenthesize(terms) if PARENTH else ' + '.join(terms)
+//; # enddef
+//;
+//; # checks: reject a configuration the datapath cannot honor
+//; if not isinstance(N_TAPS, int) or N_TAPS < 1:
+//;     error(f"{mname}: N_TAPS ({N_TAPS}) must be >= 1")
+//; # endif
+//; TRMSMPL_L    = broadcast('Q_TRMSMPL', Q_TRMSMPL)
+//; COEF_L       = broadcast('Q_COEF',    Q_COEF)
+//; TAP_GROUPS_L = None if TAP_GROUPS is None else broadcast('TAP_GROUPS', TAP_GROUPS)
+//; PIPE_L       = pipe_stages(PIPE)
+//; ROUNDS = (('TRMSMPL_ROUND', TRMSMPL_ROUND), ('PROD_ROUND', PROD_ROUND),
+//;     ('RESULT_ROUND', RESULT_ROUND))
+//; for name, mode in ROUNDS:
+//;     if mode not in qfmt.ROUND_MODES:
+//;         error(f"{mname}: {name} ({mode!r}) must be one of {', '.join(qfmt.ROUND_MODES)}")
+//;     # endif
+//; # endfor
+//; sample_fmt   = derive(qfmt.parse, Q_SMPL)
+//; result_fmt   = derive(qfmt.parse, Q_RESULT)
+//; trmsmpl_fmts = [derive(qfmt.parse, q) for q in TRMSMPL_L]
+//; coef_fmts    = [derive(qfmt.parse, q) for q in COEF_L]
+//; taps = [Tap(i, trmsmpl_fmts[i], coef_fmts[i]) for i in range(N_TAPS)]
+//; named = [('Q_SMPL', sample_fmt), ('Q_RESULT', result_fmt)]
+//; named += [(f'Q_TRMSMPL[{t.index}]', t.trmsmpl_fmt) for t in taps]
+//; named += [(f'Q_COEF[{t.index}]', t.coef_fmt) for t in taps]
+//; for name, f in named:
+//;     if not f.signed:
+//;         error(f"{mname}: {name} ({f}) is unsigned; every format here is signed")
+//;     # endif
+//; # endfor
+//; for t in taps:
+//;     if t.trmsmpl_fmt.frac > sample_fmt.frac:
+//;         error(f"{mname}: Q_TRMSMPL[{t.index}] ({t.trmsmpl_fmt}) has more fractional bits "
+//;             f"than Q_SMPL ({sample_fmt}); it could only append zeros")
+//;     # endif
+//;     if t.trmsmpl_fmt.int_bits > sample_fmt.int_bits:
+//;         error(f"{mname}: Q_TRMSMPL[{t.index}] ({t.trmsmpl_fmt}) has more integer bits "
+//;             f"than Q_SMPL ({sample_fmt}); nothing reaches them")
+//;     # endif
+//; # endfor
+//; if TRMSMPL_SYM and ISYM_SMPL:
+//;     warning(f"{mname}: TRMSMPL_SYM and ISYM_SMPL both set; the clamp fixes every trim's "
+//;         "low bound at -Q_TRMSMPL.max_code, so ISYM_SMPL cannot move a derived width. "
+//;         "ISYM_SMPL is kept: it decides where the low clamp is emitted")
+//; # endif
+//;
+//; # derivation: every step is a qfmt.Bounds; a format is taken only where a net is declared
+//; sample_bounds = qfmt.Bounds.of(sample_fmt, bool(ISYM_SMPL))
+//; for t in taps:
+//;     t.trim        = derive(qfmt.requant, sample_bounds, t.trmsmpl_fmt, TRMSMPL_ROUND,
+//;         bool(TRMSMPL_SYM))
+//;     t.prod_bounds = qfmt.bmult(qfmt.Bounds.of(t.coef_fmt, bool(ISYM_COEF)), t.trim.image())
+//; # endfor
+//; prod_frac_cap = max(t.coef_fmt.frac + t.trmsmpl_fmt.frac for t in taps)
+//; if PROD_FRAC is None:
+//;     PROD_FRAC = min(result_fmt.frac + qfmt.clog2(len(taps)), prod_frac_cap)
+//; elif PROD_FRAC > prod_frac_cap:
+//;     error(f"{mname}: PROD_FRAC ({PROD_FRAC}) exceeds max(Q_COEF.frac + Q_TRMSMPL.frac) = "
+//;         f"{prod_frac_cap} over the live taps; above it every tap is only padded")
+//; # endif
+//; for t in taps:
+//;     # the target format is the container of the image, so this requant cannot clamp
+//;     t.prod_rq = derive(qfmt.requant, t.prod_bounds, PROD_FRAC, PROD_ROUND)
+//; # endfor
+//; if (isinstance(N_GROUPS, bool) or not isinstance(N_GROUPS, int)
+//;         or not 1 <= N_GROUPS <= len(taps)):
+//;     error(f"{mname}: N_GROUPS ({N_GROUPS}) must be in 1 .. {len(taps)}, the number of "
+//;         "live taps")
+//; # endif
+//; if TAP_GROUPS_L is None:
+//;     gidx = derive(partition.cut, [t.prod_rq.dst.width for t in taps], N_GROUPS)
+//; else:
+//;     gidx = [TAP_GROUPS_L[t.index] for t in taps]
+//;     for t, g in zip(taps, gidx):
+//;         if isinstance(g, bool) or not isinstance(g, int) or not 0 <= g < N_GROUPS:
+//;             error(f"{mname}: TAP_GROUPS[{t.index}] ({g!r}) must be an integer in "
+//;                 f"0 .. {N_GROUPS-1}")
+//;         # endif
+//;     # endfor
+//; # endif
+//; for t, g in zip(taps, gidx):
+//;     t.group = g
+//; # endfor
+//; groups = [[t for t in taps if t.group == g] for g in range(N_GROUPS)]
+//; for g, members in enumerate(groups):
+//;     if not members:
+//;         error(f"{mname}: group {g} has no live tap")
+//;     # endif
+//; # endfor
+//; group_bounds = [qfmt.badd(t.prod_rq.image() for t in members) for members in groups]
+//; sum_bounds   = qfmt.badd(group_bounds)
+//; sum_fmt      = sum_bounds.fmt()
+//; out_rq       = derive(qfmt.requant, sum_bounds, result_fmt, RESULT_ROUND, bool(RESULT_SYM))
+//; # a per-tap register is what tap_en gates the clock of; with neither, it zeroes the sample
+//; pipe_trmsmpl = int('trmsmpl' in PIPE_L)
+//; pipe_prod    = int('prod' in PIPE_L)
+//; pipe_groups  = int('groups' in PIPE_L)
+//; pipe_result  = int('result' in PIPE_L)
+//; TAP_PIPE     = bool(pipe_trmsmpl or pipe_prod)
+//; latency_smpl = pipe_trmsmpl + pipe_prod + pipe_groups + pipe_result
+//; latency_coef = pipe_prod + pipe_groups + pipe_result
+//;
+//; # publish values that a parent generator might need
+//; def req_rec(step, tap, rq):
+//;     return {'step': step, 'tap': tap, 'src': rq.src.to_q(), 'dst': rq.dst.to_q(),
+//;         'mode': rq.mode, 'osym': bool(rq.osym), 'lossless': bool(rq.lossless),
+//;         'sat_reachable': bool(rq.sat_reachable)}
+//; # enddef
+//; REQUANT  = [req_rec('trim', t.index, t.trim) for t in taps]
+//; REQUANT += [req_rec('prod', t.index, t.prod_rq) for t in taps]
+//; REQUANT += [req_rec('out', None, out_rq)]
+//; parameter('Q_TRMSMPL',      [t.trmsmpl_fmt.to_q() for t in taps], force=True)
+//; parameter('Q_COEF',         [t.coef_fmt.to_q() for t in taps], force=True)
+//; parameter('Q_PROD',         [t.prod_rq.dst.to_q() for t in taps], force=True)
+//; parameter('Q_GROUPS',       [b.fmt().to_q() for b in group_bounds], force=True)
+//; parameter('Q_SUM',          sum_fmt.to_q(), force=True)
+//; parameter('TAP_GROUPS',     gidx, force=True)
+//; parameter('PIPE',           PIPE_L, force=True)
+//; parameter('LATENCY_SMPL', latency_smpl, force=True)
+//; parameter('LATENCY_COEF',   latency_coef, force=True)
+//; parameter('REQUANT',        REQUANT, force=True)
+//; parameter('PROD_FRAC',      PROD_FRAC, force=True)
+//;
+//; # RTL: the header comment, the ports, then the body. Each net is written where it is
+//; # built, so a derivation and the line it produces stay together. Only a group sum has more
+//; # than one term, so wrap_expr is used there and nowhere else. The functions the expressions
+//; # ask for are collected as they are built and emitted after the body.
+//; GUARD = f"__{mname.upper()}__"
+//; # Icarus 12 cannot connect a one-element unpacked array port and verilator cannot connect
+//; # an element in its place, so at N_TAPS=1 sample is a plain port
+//; xdim   = f" [0:{N_TAPS-1}]" if N_TAPS > 1 else ""
+//; # both column widths are measured before anything is written: the port list's type column,
+//; # and the body's declaration and name columns. A registered net is written
+//; # 'reg <decl> <name>;' and so takes no name column.
+//; port_decls  = [decl(result_fmt), decl(sample_fmt), decl(N_TAPS, signed=False)]
+//; port_decls += [decl(t.coef_fmt) for t in taps]
+//; port_w      = max(len(d) for d in port_decls)
+//; body_fmts   = [t.trmsmpl_fmt for t in taps] + [t.prod_bounds.fmt() for t in taps]
+//; body_fmts  += [t.prod_rq.dst for t in taps] + [b.fmt() for b in group_bounds] + [sum_fmt]
+//; body_decls  = [decl(f) for f in body_fmts]
+//; if TAP_PIPE:
+//;     body_decls.append(decl(N_TAPS, signed=False))
+//; # endif
+//; decl_w      = max(len(d) for d in body_decls)
+//; wires       = [idx('prod', t.index, N_TAPS, IDX_W) for t in taps] + ['sum']
+//; wires      += ['t_clk'] if TAP_PIPE else []
+//; wires      += [idx('qsample', t.index, N_TAPS, IDX_W) for t in taps if not pipe_trmsmpl]
+//; wires      += [] if TAP_PIPE else [idx('gsample', t.index, N_TAPS, IDX_W) for t in taps]
+//; if not pipe_prod:
+//;     wires  += [idx('qprod', t.index, N_TAPS, IDX_W) for t in taps]
+//; # endif
+//; if not pipe_groups:
+//;     wires  += [idx('gsum', g, N_GROUPS, IDX_W) for g in range(N_GROUPS)]
+//; # endif
+//; name_w = max(len(n) for n in wires)
+\`ifndef `GUARD`
+\`define `GUARD`
+// fixed-point dot product: per-tap trim, multiply, requant to one binary point, grouped
+// sum, output requant. `N_TAPS` taps; sample `sample_fmt`, result `result_fmt`;
+// PROD_FRAC=`PROD_FRAC`; latency `latency_smpl` from sample, `latency_coef` from coef.
+// A tap whose tap_en bit is clear `'holds its last product' if TAP_PIPE else 'contributes zero'`.
+//; for t in taps:
+//   tap `t.index`: `tap_note(t)`, group `t.group`
+//; # endfor
+//; for g, members in enumerate(groups):
+//   group `g`: taps `[t.index for t in members]`, gsum `group_bounds[g].fmt()`
+//; # endfor
+//   sum `sum_fmt`
+module `mname` (
+        output `'reg ' if pipe_result else 'wire'` `decl(result_fmt).ljust(port_w)` result,
+        input  wire `decl(sample_fmt).ljust(port_w)` sample`xdim`,
+//; for t in taps:
+        input  wire `decl(t.coef_fmt).ljust(port_w)` `idx('coef', t.index, N_TAPS, IDX_W)`,
+//; # endfor
+//; # tap_en and clk are always ports, so the interface does not change with the parameters
+        input  wire `decl(N_TAPS, signed=False).ljust(port_w)` tap_en,
+        input  wire `' ' * port_w` clk
+    );
+
+//; if TAP_PIPE:
+//;     # one clock per tap. tap_en has to change away from the rising edge of clk, or the
+//;     # gate passes a spurious edge; every testbench here drives it at the negedge.
+    wire `decl(N_TAPS, signed=False).ljust(decl_w)` `'t_clk'.ljust(name_w)` = {`N_TAPS`{clk}} & tap_en;
+//; elif not (pipe_groups or pipe_result):
+    // nothing is registered in this configuration, so nothing reads clk; the port is there
+    // because the interface does not change with the parameters
+    wire unused_clk = clk;
+//; # endif
+
+//; for t in taps:
+//;     i, fs = t.index, t.trmsmpl_fmt
+//;     qsample, prod, qprod = (idx('qsample', i, N_TAPS, IDX_W), idx('prod', i, N_TAPS, IDX_W),
+//;         idx('qprod', i, N_TAPS, IDX_W))
+//;     src = sample_elem(i)
+//;     if t.trim.shift > 0 or t.trim.sat_lo or t.trim.sat_hi:
+//;         src = f"{qcvt('trim', t.trim, True, qsample)}({src})"
+//;     # endif
+//;     operand, opexpr = qsample, src
+//;     if not TAP_PIPE:
+//;         # with no register to gate, a disabled tap feeds the multiplier a zero sample so
+//;         # it does not toggle; the trimmed value keeps its own net because a function call
+//;         # cannot sit in a ternary
+    wire `decl(fs).ljust(decl_w)` `qsample.ljust(name_w)` = `src`;
+//;         operand = idx('gsample', i, N_TAPS, IDX_W)
+//;         opexpr  = f"tap_en[{i}] ? {qsample} : {lit(0, fs.width)}"
+//;     # endif
+//;     if pipe_trmsmpl:
+    reg  `decl(fs).ljust(decl_w)` `operand`;
+    always @(posedge t_clk[`i`])
+        `operand` <= `opexpr`;
+//;     else:
+    wire `decl(fs).ljust(decl_w)` `operand.ljust(name_w)` = `opexpr`;
+//;     # endif
+//;     pf    = t.prod_bounds.fmt()
+//;     coef  = sx(idx('coef', i, N_TAPS, IDX_W), t.coef_fmt.width, pf.width, prod)
+//;     pexpr = f"{coef} * {sx(operand, fs.width, pf.width, prod)}"
+    wire `decl(pf).ljust(decl_w)` `prod.ljust(name_w)` = `pexpr`;
+//;     rq = t.prod_rq
+//;     if rq.shift > 0:
+//;         qexpr = f"{qcvt('prod', rq, False, qprod)}({prod})"
+//;     elif rq.shift < 0:
+//;         qexpr = pad_low(prod, -rq.shift)
+//;     else:
+//;         qexpr = prod
+//;     # endif
+//;     if pipe_prod:
+    reg  `decl(rq.dst).ljust(decl_w)` `qprod`;
+    always @(posedge t_clk[`i`])
+        `qprod` <= `qexpr`;
+//;     else:
+    wire `decl(rq.dst).ljust(decl_w)` `qprod.ljust(name_w)` = `qexpr`;
+//;     # endif
+
+//; # endfor
+//; for g, members in enumerate(groups):
+//;     gsum, gf = idx('gsum', g, N_GROUPS, IDX_W), group_bounds[g].fmt()
+//;     gexpr    = summed([sx(idx('qprod', t.index, N_TAPS, IDX_W), t.prod_rq.dst.width, gf.width, gsum)
+//;         for t in members])
+//;     if pipe_groups:
+//;         lines = sum_lines(f"        {gsum} <= ", gexpr)
+    reg  `decl(gf).ljust(decl_w)` `gsum`;
+    always @(posedge clk)
+//;         for line in lines:
+`line``';' if line is lines[-1] else ''`
+//;         # endfor
+//;         if len(lines) > 1:
+
+//;         # endif
+//;     else:
+//;         lines = sum_lines(f"    wire {decl(gf).ljust(decl_w)} {gsum.ljust(name_w)} = ", gexpr)
+//;         for line in lines:
+`line``';' if line is lines[-1] else ''`
+//;         # endfor
+//;     # endif
+//; # endfor
+//; sexpr = summed([sx(idx('gsum', g, N_GROUPS, IDX_W), b.fmt().width, sum_fmt.width, 'sum')
+//;     for g, b in enumerate(group_bounds)])
+//; lines = sum_lines(f"    wire {decl(sum_fmt).ljust(decl_w)} {'sum'.ljust(name_w)} = ", sexpr)
+//; for line in lines:
+`line``';' if line is lines[-1] else ''`
+//; # endfor
+//; if out_rq.shift > 0 or out_rq.sat_lo or out_rq.sat_hi:
+//;     result = f"{qcvt('out', out_rq, True, 'result')}(sum)"
+//; else:
+//;     grow   = result_fmt.int_bits - sum_fmt.int_bits
+//;     result = pad_low(sx('sum', sum_fmt.width, sum_fmt.width + grow, 'result'), -out_rq.shift)
+//; # endif
+//; if pipe_result:
+    always @(posedge clk)
+        result <= `result`;
+//; else:
+    assign result = `result`;
+//; # endif
+//; for f in sorted(funcs.values(), key=lambda f: f['order']):
+//;     users = textwrap.wrap(', '.join(f['users']), 84)
+
+    // used by `users[0]`
+//;     for u in users[1:]:
+    //         `u`
+//;     # endfor
+//;     self.include_params = dict(f['params'], func_name=f['name'])
+//;     include(f['leaf'])
+//; # endfor
+endmodule
+\`endif

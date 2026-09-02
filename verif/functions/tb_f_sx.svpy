@@ -12,17 +12,13 @@ module `mname`;
     logic signed [`OW-1`:0] y;
     longint signed          xs, exp;
 
-    function longint signed ref_sx(input longint signed v);
-        ref_sx = v;
-    endfunction
-
     initial begin
         tb_data_open("`CFG`", "x,y,exp");
         for (int i = 0; i < `1 << IW`; i++) begin
             x   = i[`IW-1`:0];
             xs  = longint'(x);
             y   = dut(x);
-            exp = ref_sx(xs);
+            exp = xs;
             tb_check(64'(y), exp, $sformatf("x=%0d", xs));
             tb_data_row($sformatf("%0d,%0d,%0d", xs, y, exp));
         end

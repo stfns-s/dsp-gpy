@@ -26,7 +26,7 @@ module `mname`;
     longint signed          as, bs, exp;
 
     // documented intent: a shifted left by the log of b, negated with b's sign, all in
-    // `OW` bits. The shift never overflows `OW`, so the truncation below is a no-op.
+    // `OW` bits. The shift never overflows `OW`.
     function longint signed ref_slogmult(input longint signed av, bv);
         longint signed l, log2b, res;
         reg [`BW-1`:0] ib;   // unsigned index; a size cast would keep bv's sign
@@ -36,7 +36,7 @@ module `mname`;
             l     = longint'(ref_log2[ib]);
             sb    = l[`LOG_MSB`];
             log2b = l & `(1 << LOG_MSB) - 1`;
-            res   = tb_sext(av << log2b, `OW`);
+            res   = av << log2b;
 //; if OAPPROX:
             if (sb) res = tb_sext(~res, `OW`);
 //; else:

@@ -51,7 +51,7 @@ REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO
 readonly BUILDDIR="${BUILDDIR:-build}"
 readonly TBDIR="${TBDIR:-verif}"
-readonly INCDIR="${INCDIR:-funcs}"
+readonly INCDIR="${INCDIR:-functions}"
 readonly LIBDIR="${LIBDIR:-lib}"
 readonly MODDIR="${MODDIR:-modules}"
 readonly GENESISPY="${GENESISPY:-genesispy}"
@@ -64,7 +64,7 @@ usage() {
 usage: run-tb.sh <name> <config> <simulator> [-data] [-plot] [-dump]
 
   <name>       function or module under test, e.g. f_round or intg; the testbench is
-               verif/funcs/tb_<name>.svpy or verif/modules/tb_<name>.svpy
+               verif/functions/tb_<name>.svpy or verif/modules/tb_<name>.svpy
   <config>     generation parameters joined by ':', or the word 'default' for none
   <simulator>  verilator, iverilog, or gen to elaborate only and stop
   -data        also write data.csv next to the run logs, for plot.py
@@ -73,11 +73,11 @@ usage: run-tb.sh <name> <config> <simulator> [-data] [-plot] [-dump]
                run logs. Worth asking for on a module testbench: a function one has no
                clock and finishes at time zero, so its trace holds only the last case.
 
-All three default to off. 'data' without the dash is still accepted.
+All three default to off.
 
 Run it from the repo root, with genesispy on PATH:
 
-  source setup.sh
+  source 0.setup.sh
 
 Examples:
 
@@ -136,12 +136,27 @@ verilator | iverilog | gen) ;;
     ;;
 esac
 
+# The config names a directory under build/, and rm -rf runs on it.
+case "$config" in
+*/* | *..*)
+    echo "run-tb.sh: config '${config}' may not contain '/' or '..'" >&2
+    exit "$RC_USAGE"
+    ;;
+esac
+
+case "$BUILDDIR" in
+/*)
+    echo "run-tb.sh: BUILDDIR '${BUILDDIR}' must be relative to the repository root" >&2
+    exit "$RC_USAGE"
+    ;;
+esac
+
 want_data=""
 want_plot=""
 want_dump=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-    data | -data) want_data=1 ;;
+    -data)        want_data=1 ;;
     -plot)        want_data=1; want_plot=1 ;;
     -dump)        want_dump=1 ;;
     *)
@@ -154,6 +169,13 @@ done
 
 if [[ "$sim" == "gen" && (-n "$want_data" || -n "$want_plot" || -n "$want_dump") ]]; then
     echo "run-tb.sh: -data, -plot and -dump need a simulator to run, not 'gen'" >&2
+    exit "$RC_USAGE"
+fi
+
+# A generator that is not on PATH fails the same way a template rejection does, and a NEG
+# entry would be satisfied by the absence of the tool it was written to exercise.
+if ! command -v "$GENESISPY" >/dev/null 2>&1; then
+    echo "run-tb.sh: '${GENESISPY}' not found; source 0.setup.sh, or set GENESISPY" >&2
     exit "$RC_USAGE"
 fi
 
@@ -188,7 +210,7 @@ if [[ -f "${MODDIR}/${func}.svpy" ]]; then
 fi
 
 if ! "$GENESISPY" "${inputs[@]}" --top "$tb" \
-        --src-path "${TBDIR}/funcs" --src-path "${TBDIR}/modules" --src-path "$MODDIR" \
+        --src-path "${TBDIR}/functions" --src-path "${TBDIR}/modules" --src-path "$MODDIR" \
         --inc-path "$INCDIR" --inc-path "${TBDIR}/common" --py-path "$LIBDIR" \
         --out-dir "$base" --synth-dir "${base}/synth" --verif-dir "${base}/verif" \
         --raw-dir "${base}/raw" --vf-out "${base}/tb.vf" --log "${base}/genesispy.log" \

@@ -26,7 +26,7 @@
             uflow = uflow | x[`iwidth-1`] & ( x[`ow-1`:0] == `lit(ominn, ow)` );
 //; # endif
 
-            case ( { oflow, uflow } ) // synthesis parallel_case full_case
+            case ( { oflow, uflow } )
 //; if osym:
                 2'b01:   `func_name` = `lit(ominn+1, ow)`;
 //; else:

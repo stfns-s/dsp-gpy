@@ -3,16 +3,16 @@
 # Target and variable names follow the genesispy demo rules in
 # genesispy/demos/genesispy.mk. Those rules are not included directly: they
 # require sources under ./genesis_src/ and hardcode that as the --src-path,
-# while this repo keeps modules in modules/ and functions in funcs/. Both tops
+# while this repo keeps modules in modules/ and functions in functions/. Both tops
 # are independent, so each gets its own rules, the way the
 # generation_examples demo handles its five.
 #
 # Needs genesispy on PATH:
-#   source setup.sh
+#   source 0.setup.sh
 
-TOPS      ?= iir intg
+TOPS      ?= iir intg dotp
 SRCDIR    ?= modules
-INCDIR    ?= funcs
+INCDIR    ?= functions
 LIBDIR    ?= lib
 VERIFDIR  ?= verif
 BUILDDIR  ?= build
@@ -36,7 +36,6 @@ PYTHON    ?= python3
 topdir = $(BUILDDIR)/$(1)/default
 
 VLOG_VF    = $(foreach t,$(TOPS),$(call topdir,$(t))/$(t).vf)
-FLAGSTAMPS = $(foreach t,$(TOPS),$(call topdir,$(t))/$(t).flags)
 
 # make sim drives a testbench, which verif/run-tb.sh elaborates: it owns the two
 # --input files, the verif/ search paths and --synth-top. run-tb.sh puts one tree per
@@ -93,7 +92,7 @@ $$(TOPDIR_$(1))/$(1).flags: FORCE | $$(TOPDIR_$(1))
 
 # genesispy leaves an output file alone when its content is unchanged, and
 # the .vf content never varies, so touch it to mark the build done.
-$$(TOPDIR_$(1))/$(1).vf: $$(SRCDIR)/$(1).svpy $$(TOPDIR_$(1))/$(1).flags
+$$(TOPDIR_$(1))/$(1).vf: $$(SRCDIR)/$(1).svpy $$(TOPDIR_$(1))/$(1).flags $$(wildcard $$(LIBDIR)/*.py)
 	$$(GEN_CMD_$(1))
 	@touch $$@
 
@@ -114,10 +113,10 @@ $(foreach t,$(TOPS),$(eval $(call top_rules,$(t))))
 
 vlint: $(addprefix vlint-,$(TOPS))
 
-# A top's raw/ sits two levels down and a testbench's three, since run-tb.sh adds a
-# directory per simulator, so find the directories rather than glob a fixed depth.
+# Only the tops: the testbench trees under $(BUILDDIR) are rewritten by vlint-tb and
+# test jobs that -j may be running at the same time.
 pylint: gen
-	$(PYTHON) -m py_compile $$(find $(BUILDDIR) -path '*/raw/*.py')
+	$(PYTHON) -m py_compile $(foreach t,$(TOPS),$(call topdir,$(t))/raw/*.py)
 
 # vlint-tb is part of the gate, not a report run by hand: it is the only place the 17
 # functions get verilator-linted, since the default TB_SIMS is iverilog and never
@@ -140,27 +139,27 @@ sim:
 	$(VERIFDIR)/run-tb.sh $(SIM_NAME) $(SIM_CFG) gen
 	@mkdir -p $(SIM_OUT)
 ifeq ($(SIMULATOR),xrun)
-	xrun -sv -access +rwc -64bit +define+SIMULATION $(DUMP_DEF) -f $(SIM_VF) -top $(SIM_TOP)
+	xrun -sv -access +rwc -64bit $(DUMP_DEF) -f $(SIM_VF) -top $(SIM_TOP)
 else ifeq ($(SIMULATOR),vcs)
-	vcs -sverilog +define+SIMULATION $(DUMP_DEF) -f $(SIM_VF) -top $(SIM_TOP) -o $(SIM_OUT)/simv \
+	vcs -sverilog $(DUMP_DEF) -f $(SIM_VF) -top $(SIM_TOP) -o $(SIM_OUT)/simv \
 	    && $(SIM_OUT)/simv
 else ifeq ($(SIMULATOR),vlog)
-	vlog -sv +define+SIMULATION $(DUMP_DEF) -f $(SIM_VF) && vsim -c -do "run -all; quit" $(SIM_TOP)
+	vlog -sv $(DUMP_DEF) -f $(SIM_VF) && vsim -c -do "run -all; quit" $(SIM_TOP)
 else ifeq ($(SIMULATOR),verilator)
 	verilator --binary -Wno-fatal --timing -CFLAGS -std=c++20 \
-	    +define+SIMULATION $(DUMP_DEF) $(DUMP_TRACE) --top-module $(SIM_TOP) -f $(SIM_VF) \
+	    $(DUMP_DEF) $(DUMP_TRACE) --top-module $(SIM_TOP) -f $(SIM_VF) \
 	    -Mdir $(SIM_OUT)/obj && $(SIM_OUT)/obj/V$(SIM_TOP)
 else ifeq ($(SIMULATOR),iverilog)
-	iverilog -g2012 -DSIMULATION $(DUMP_IDEF) -s $(SIM_TOP) -o $(SIM_OUT)/$(SIM_TOP).vvp -f $(SIM_VF) \
+	iverilog -g2012 $(DUMP_IDEF) -s $(SIM_TOP) -o $(SIM_OUT)/$(SIM_TOP).vvp -f $(SIM_VF) \
 	    && vvp $(SIM_OUT)/$(SIM_TOP).vvp
 else
 	$(error sim: unknown SIMULATOR='$(SIMULATOR)' (xrun|vcs|vlog|verilator|iverilog))
 endif
 
 # ---------------------------------------------------------------------------
-# Unit tests for the function library in funcs/ and the modules in modules/
+# Unit tests for the function library in functions/ and the modules in modules/
 #
-# Each function has a testbench in verif/funcs/ that checks it against a 64-bit
+# Each function has a testbench in verif/functions/ that checks it against a 64-bit
 # reference over an exhaustive input sweep. A module testbench in verif/modules/
 # instantiates the module and steps a 64-bit reference alongside it, one clock at a
 # time. verif/run-tb.sh generates, builds and runs one of either in one configuration;
@@ -303,13 +302,15 @@ $(BUILDDIR):
 
 test: pytest $(addprefix test-,$(FUNCS) $(MODS))
 
-# The extra regression. 'make test test-extra' covers both simulators.
+# The extra regression. 'make test test-extra' covers both simulators; pytest runs once,
+# under test.
 test-extra:
-	@$(MAKE) --no-print-directory test TB_SIMS=verilator
+	@$(MAKE) --no-print-directory $(addprefix test-,$(FUNCS) $(MODS)) TB_SIMS=verilator
 
 # Breadth instead of depth: every function and module in its default configuration under
 # both simulators, where test walks the sweep tables under one. One rule per name, so -j
-# runs them at once; the sweeps are what take the time, and smoke has none.
+# runs them at once; the sweeps are what take the time, and smoke has none. Smoke writes
+# under $(BUILDDIR)/smoke, so it never shares a tree with test-<name>.
 SMOKE_SIMS ?= iverilog verilator
 
 define func_smoke_rules
@@ -317,7 +318,7 @@ define func_smoke_rules
 test-smoke-$(1):
 	@fail=0; \
 	for sim in $$(SMOKE_SIMS); do \
-	    $$(VERIFDIR)/run-tb.sh $(1) default $$$$sim || fail=1; \
+	    BUILDDIR=$$(BUILDDIR)/smoke $$(VERIFDIR)/run-tb.sh $(1) default $$$$sim || fail=1; \
 	done; \
 	exit $$$$fail
 endef
@@ -333,7 +334,7 @@ plot_tag = $(subst =,,$(subst :,_,$(or $(CFG),default)))
 
 plot:
 	@test -n "$(FUNC)" || { echo "usage: make plot FUNC=<name> [CFG=IW=8:CW=4] [OUT=x.png]"; exit 2; }
-	-@$(VERIFDIR)/run-tb.sh $(FUNC) $(or $(CFG),default) verilator data
+	-@$(VERIFDIR)/run-tb.sh $(FUNC) $(or $(CFG),default) verilator -data
 	$(PYTHON) $(VERIFDIR)/plot.py \
 	    $(BUILDDIR)/tb_$(FUNC)/$(plot_tag)/verilator/data.csv \
 	    $(if $(OUT),--out $(OUT))
@@ -354,16 +355,20 @@ help:
 	@echo "  gen      - elaborate every top in TOPS (default)"
 	@echo "  iir      - elaborate just iir"
 	@echo "  intg     - elaborate just intg"
+	@echo "  dotp     - elaborate just dotp"
 	@echo "  vlint    - lint every top (VERILINT=slang|verilator; default verilator)"
 	@echo "  vlint-<top> - lint one top"
+	@echo "  vlint-tb - lint every function testbench with -Wall in every swept configuration"
+	@echo "  vlint-tb-<f> - lint one function testbench"
 	@echo "  pylint   - py_compile the generated Python modules"
-	@echo "  lint     - pylint + vlint"
+	@echo "  lint     - pylint + vlint + vlint-tb"
 	@echo "  sim      - run SIM_TOP once under SIMULATOR; the checked run is test-<name>"
 	@echo "             make sim DUMP=1 writes dump.vcd (worth it for a module)"
-	@echo "  pytest   - the Q format library in $(LIBDIR)/tests; no simulator"
-	@echo "  test     - pytest, plus every function in funcs/ and module in modules/ under $(TB_SIMS) (use -j)"
+	@echo "  pytest   - the library tests in $(LIBDIR)/tests; no simulator"
+	@echo "  test     - pytest, plus every function in functions/ and module in modules/ under $(TB_SIMS) (use -j)"
 	@echo "  test-extra - re-run the whole suite under verilator (two-state, the slower build)"
 	@echo "  test-smoke - every function and module in its default configuration under $(SMOKE_SIMS)"
+	@echo "  test-smoke-<name> - one function or module, default configuration only"
 	@echo "  test-<f> - unit-test one function or module, e.g. test-f_round, test-intg"
 	@echo "  plot     - make plot FUNC=f_shright [CFG=IW=8:CW=4] [OUT=x.png]"
 	@echo "  cleangen - remove $(BUILDDIR): elaboration output, test results and logs"
@@ -376,12 +381,20 @@ help:
 	@echo "Variables (current values):"
 	@echo "  TOPS      = $(TOPS)"
 	@echo "  MODS      = $(MODS)"
+	@echo "  FUNCS     = $(FUNCS)"
 	@echo "  SRCDIR    = $(SRCDIR)"
 	@echo "  INCDIR    = $(INCDIR)"
 	@echo "  VERIFDIR  = $(VERIFDIR)"
+	@echo "  LIBDIR    = $(LIBDIR)"
 	@echo "  BUILDDIR  = $(BUILDDIR)"
 	@echo "  SIMULATOR = $(SIMULATOR)"
 	@echo "  SIM_TOP   = $(SIM_TOP)"
 	@echo "  SIM_CFG   = $(SIM_CFG)"
 	@echo "  DUMP      = $(DUMP)"
 	@echo "  VERILINT  = $(VERILINT)"
+	@echo "  TB_SIMS   = $(TB_SIMS)"
+	@echo "  SMOKE_SIMS = $(SMOKE_SIMS)"
+	@echo "  VLINT_TB_SKIP = $(VLINT_TB_SKIP)"
+	@echo "  EXTRA_FLAGS = $(EXTRA_FLAGS)"
+	@echo "  GENESISPY = $(GENESISPY)"
+	@echo "  PYTHON    = $(PYTHON)"

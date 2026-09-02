@@ -1,0 +1,650 @@
+// testbench for dotp: a Python model built at generation, the RTL checked
+// against its tables at run time, and the latencies measured rather than assumed
+//; from fractions import Fraction
+//; import random
+//; import qfmt
+//; from vexpr import decl, idx
+//; # Every dotp parameter defaults to None and is forwarded only when a sweep sets it, so a
+//; # run that names none of them tests dotp's own defaults. The effective values are read
+//; # back from the instance below; nothing here restates one.
+//; # (scalar or list) takes one value or a comma list of N_TAPS
+//; N_TAPS        = parameter('N_TAPS',        None)       # number of taps
+//; Q_SMPL        = parameter('Q_SMPL',        None)       # sample format, shared by every tap
+//; Q_TRMSMPL     = parameter('Q_TRMSMPL',     None)       # trimmed sample format (scalar or list)
+//; TRMSMPL_ROUND = parameter('TRMSMPL_ROUND', None)       # rounding of the sample trim
+//; TRMSMPL_SYM   = parameter('TRMSMPL_SYM',   None)       # symmetric clamp on the trim
+//; ISYM_SMPL     = parameter('ISYM_SMPL',     None)       # samples never take their min code
+//; Q_COEF        = parameter('Q_COEF',        None)       # coefficient format (scalar or list)
+//; ISYM_COEF     = parameter('ISYM_COEF',     None)       # coefficients never take their min code
+//; PROD_FRAC     = parameter('PROD_FRAC',     None)       # product frac bits; dotp derives if None
+//; PROD_ROUND    = parameter('PROD_ROUND',    None)       # rounding of the product requant
+//; N_GROUPS      = parameter('N_GROUPS',      None)       # number of groups
+//; TAP_GROUPS    = parameter('TAP_GROUPS',    None)       # explicit partition (scalar or list)
+//; PARENTH       = parameter('PARENTH',       None)       # balance the adder trees
+//; Q_RESULT      = parameter('Q_RESULT',      None)       # output format
+//; RESULT_ROUND  = parameter('RESULT_ROUND',  None)       # rounding mode of the output requant
+//; RESULT_SYM    = parameter('RESULT_SYM',    None)       # symmetric clamp on the output
+//; PIPE          = parameter('PIPE',          None)       # registered stages (or 'none')
+//; NRAND         = parameter('NRAND',         500)        # random vectors in the first block
+//; SEED          = parameter('SEED',          1)          # seed of every random draw
+//; # -p carries scalars, so a sweep spells a per-tap list with commas and it is split here;
+//; # str(v) because a one-element numeric list arrives already coerced (-p TAP_GROUPS=0 is an
+//; # int). The parts are passed on as they are: dotp broadcasts a single entry over its taps
+//; # and rejects any other wrong length, so that check stays in one place.
+//; def taps(v, conv=str):
+//;     if v is None:
+//;         return None
+//;     # endif
+//;     parts = list(v) if isinstance(v, (list, tuple)) else str(v).split(',')
+//;     return [conv(p) for p in parts]
+//; # enddef
+//; kw = dict(N_TAPS=N_TAPS, Q_SMPL=Q_SMPL, Q_TRMSMPL=taps(Q_TRMSMPL), ISYM_SMPL=ISYM_SMPL,
+//;     TRMSMPL_ROUND=TRMSMPL_ROUND, TRMSMPL_SYM=TRMSMPL_SYM, Q_COEF=taps(Q_COEF),
+//;     ISYM_COEF=ISYM_COEF, PROD_FRAC=PROD_FRAC, PROD_ROUND=PROD_ROUND, N_GROUPS=N_GROUPS,
+//;     TAP_GROUPS=taps(TAP_GROUPS, int), PARENTH=PARENTH, Q_RESULT=Q_RESULT,
+//;     RESULT_ROUND=RESULT_ROUND, RESULT_SYM=RESULT_SYM, PIPE=PIPE)
+//; dut = unique_inst('dotp', 'dut', **{k: v for k, v in kw.items() if v is not None})
+//; # every value the model uses comes back from the instance, never from a default above
+//; N_TAPS        = dut.get_param('N_TAPS')
+//; Q_SMPL        = dut.get_param('Q_SMPL')
+//; Q_TRMSMPL     = dut.get_param('Q_TRMSMPL')       # dotp republishes this one per tap
+//; TRMSMPL_ROUND = dut.get_param('TRMSMPL_ROUND')
+//; TRMSMPL_SYM   = dut.get_param('TRMSMPL_SYM')
+//; ISYM_SMPL     = dut.get_param('ISYM_SMPL')
+//; Q_COEF        = dut.get_param('Q_COEF')          # and this one
+//; ISYM_COEF     = dut.get_param('ISYM_COEF')
+//; PROD_FRAC     = dut.get_param('PROD_FRAC')       # derived when the sweep leaves it unset
+//; PROD_ROUND    = dut.get_param('PROD_ROUND')
+//; N_GROUPS      = dut.get_param('N_GROUPS')
+//; TAP_GROUPS    = dut.get_param('TAP_GROUPS')      # the partition dotp settled on
+//; PARENTH       = dut.get_param('PARENTH')
+//; Q_RESULT      = dut.get_param('Q_RESULT')
+//; RESULT_ROUND  = dut.get_param('RESULT_ROUND')
+//; RESULT_SYM    = dut.get_param('RESULT_SYM')
+//; PIPE          = dut.get_param('PIPE')            # the stage list, in datapath order
+//; pipe_trmsmpl  = int('trmsmpl' in PIPE)
+//; pipe_prod     = int('prod' in PIPE)
+//; pipe_groups   = int('groups' in PIPE)
+//; pipe_result   = int('result' in PIPE)
+//; # only the notation comes from the library; the reference arithmetic below is the
+//; # testbench's own, so the check stays independent of what dotp derives
+//; def parse_q(s):
+//;     try:
+//;         return qfmt.parse(s)
+//;     except qfmt.QError as e:
+//;         error(f"{mname}: {e}")
+//; # enddef
+//; F_SMPL       = parse_q(Q_SMPL)
+//; F_RESULT     = parse_q(Q_RESULT)
+//; F_TRMSMPL    = [parse_q(q) for q in Q_TRMSMPL]
+//; F_COEF       = [parse_q(q) for q in Q_COEF]
+//; GIDX         = TAP_GROUPS
+//; LATENCY_SMPL = dut.get_param('LATENCY_SMPL')
+//; LATENCY_COEF = dut.get_param('LATENCY_COEF')
+//; REQUANT      = dut.get_param('REQUANT')
+//; Q_PROD_R     = [parse_q(q) for q in dut.get_param('Q_PROD')]
+//; Q_GROUPS_R   = [parse_q(q) for q in dut.get_param('Q_GROUPS')]
+//; Q_SUM_R      = parse_q(dut.get_param('Q_SUM'))
+//; CLK          = LATENCY_SMPL > 0
+//; IDX_W        = 2                 # dotp's index width; the port names have to match
+//; FULL         = (1 << N_TAPS) - 1
+//; # a tap's clock is gated only where the tap has a register; with neither per-tap stage
+//; # dotp zeroes the sample instead, and the reference stays a function of one vector
+//; TAP_PIPE     = bool(pipe_trmsmpl or pipe_prod)
+//; for rec in REQUANT:
+//;     if rec['step'] == 'prod' and rec['sat_reachable']:
+//;         error(f"{mname}: dotp published a product requant that can saturate: {rec}")
+//;     # endif
+//; # endfor
+//; if 2 * N_TAPS > 62:
+//;     error(f"{mname}: {N_TAPS} taps need a corner mask wider than a longint")
+//; # endif
+//; if F_SMPL.width > 31 or any(f.width > 31 for f in F_COEF):
+//;     error(f"{mname}: a format wider than 31 bits does not fit the table literals")
+//; # endif
+//; # The configuration line is what run-tb.sh matches every -p against, so it carries the
+//; # values dotp resolved, not the ones asked for: a parameter the testbench dropped shows
+//; # up as a mismatch there. A per-tap list whose entries are all equal is spelled as the one
+//; # entry, which is how a sweep spells a broadcast; an entry that spells an all-equal list
+//; # out in full would not match, and none does.
+//; def spell(v):
+//;     parts = [str(x) for x in v]
+//;     return parts[0] if len(set(parts)) == 1 else ','.join(parts)
+//; # enddef
+//; TRM_S, COEF_S, GRP_S = spell(Q_TRMSMPL), spell(Q_COEF), spell(TAP_GROUPS)
+//; CFG  = f"{mname} N_TAPS={N_TAPS} Q_SMPL={Q_SMPL} Q_TRMSMPL={TRM_S}"
+//; CFG += f" TRMSMPL_ROUND={TRMSMPL_ROUND} TRMSMPL_SYM={TRMSMPL_SYM}"
+//; CFG += f" ISYM_SMPL={ISYM_SMPL} Q_COEF={COEF_S} ISYM_COEF={ISYM_COEF}"
+//; CFG += f" PROD_FRAC={PROD_FRAC} PROD_ROUND={PROD_ROUND} N_GROUPS={N_GROUPS}"
+//; CFG += f" TAP_GROUPS={GRP_S} PARENTH={PARENTH} Q_RESULT={Q_RESULT}"
+//; CFG += f" RESULT_ROUND={RESULT_ROUND} RESULT_SYM={RESULT_SYM}"
+//; CFG += f" PIPE={','.join(PIPE) if PIPE else 'none'}"
+//; CFG += f" NRAND={NRAND} SEED={SEED}"
+//; # ---------------------------------------------------------------- the model
+//; # Code bounds from width and signedness, rounding by floor division and remainder, and
+//; # hand-written clamps: nothing here calls Requant, Bounds, bmult or badd.
+//; def lo_hi(f, sym=False):
+//;     if not f.signed:
+//;         return 0, (1 << f.width) - 1
+//;     # endif
+//;     top = (1 << (f.width - 1)) - 1
+//;     return (-top if sym else -top - 1), top
+//; # enddef
+//; def rdiv(num, sh, mode):
+//;     den = 1 << sh
+//;     fl  = num // den
+//;     rem = num - fl * den
+//;     if mode == 'trunc':
+//;         up = False
+//;     elif mode == 'half_up':
+//;         up = 2 * rem >= den
+//;     elif mode == 'half_even':
+//;         up = 2 * rem > den or (2 * rem == den and fl % 2 != 0)
+//;     elif mode == 'half_away':
+//;         up = 2 * rem > den or (2 * rem == den and fl >= 0)
+//;     elif mode == 'to_zero':
+//;         up = fl < 0 and rem > 0
+//;     else:
+//;         error(f"{mname}: bad rounding mode {mode}")
+//;     # endif
+//;     return fl + 1 if up else fl
+//; # enddef
+//; def cvt(code, sfrac, dfrac, mode, lo=None, hi=None):
+//;     sh = sfrac - dfrac
+//;     v  = code << -sh if sh <= 0 else rdiv(code, sh, mode)
+//;     return v if lo is None else min(hi, max(lo, v))
+//; # enddef
+//; XLO, XHI = lo_hi(F_SMPL)
+//; XLO     += int(ISYM_SMPL)
+//; SLO      = [lo_hi(f, TRMSMPL_SYM)[0] for f in F_TRMSMPL]
+//; SHI      = [lo_hi(f)[1] for f in F_TRMSMPL]
+//; HLO      = [lo_hi(f)[0] + int(ISYM_COEF) for f in F_COEF]
+//; HHI      = [lo_hi(f)[1] for f in F_COEF]
+//; OLO, OHI = lo_hi(F_RESULT, RESULT_SYM)
+//; # the three combinational steps of the datapath, each on its own so that the steady-state
+//; # model and the register walk further down share one arithmetic
+//; def trim(i, x):
+//;     return cvt(x, F_SMPL.frac, F_TRMSMPL[i].frac, TRMSMPL_ROUND, SLO[i], SHI[i])
+//; # enddef
+//; def prod(i, h, s):
+//;     return cvt(h * s, F_COEF[i].frac + F_TRMSMPL[i].frac, PROD_FRAC, PROD_ROUND)
+//; # enddef
+//; def total(q):
+//;     u = [sum(q[i] for i in range(N_TAPS) if GIDX[i] == g) for g in range(N_GROUPS)]
+//;     t = sum(u)
+//;     return u, t, cvt(t, PROD_FRAC, F_RESULT.frac, RESULT_ROUND, OLO, OHI)
+//; # enddef
+//; # xs: sample codes by tap; hs: coefficient codes by tap; en: tap_en as an integer. This is
+//; # one vector held until every stage has taken it, which is what the derivation check and
+//; # the latency probes ask for; the run below tracks the registers instead.
+//; def model(xs, hs, en):
+//;     s = [trim(i, xs[i]) for i in range(N_TAPS)]
+//;     if not TAP_PIPE:
+//;         s = [s[i] if (en >> i) & 1 else 0 for i in range(N_TAPS)]
+//;     # endif
+//;     q = [prod(i, hs[i], s[i]) for i in range(N_TAPS)]
+//;     u, t, y = total(q)
+//;     return s, q, u, t, y
+//; # enddef
+//; # -------------------------------------------------------------- the vectors
+//; # A corner mask holds two bits per tap i: bit 2i puts the sample at its top code rather
+//; # than its bottom one, bit 2i+1 does the same for the coefficient.
+//; def corner(m):
+//;     xs = [XHI if (m >> (2 * i)) & 1 else XLO for i in range(N_TAPS)]
+//;     hs = [HHI[i] if (m >> (2 * i + 1)) & 1 else HLO[i] for i in range(N_TAPS)]
+//;     return xs, hs
+//; # enddef
+//; # sample pattern ps and coefficient pattern ph, each 0..3: all bottom, all top, alternating
+//; # from the bottom, alternating from the top. The four patterns put every tap at both ends.
+//; def umask(ps, ph):
+//;     m = 0
+//;     for i in range(N_TAPS):
+//;         sb = (ps & 1) if ps < 2 else (i & 1) ^ (ps & 1)
+//;         hb = (ph & 1) if ph < 2 else (i & 1) ^ (ph & 1)
+//;         m |= sb << (2 * i) | hb << (2 * i + 1)
+//;     # endfor
+//;     return m
+//; # enddef
+//; rng = random.Random(SEED)
+//; def rand_vec():
+//;     xs = [rng.randint(XLO, XHI) for _ in range(N_TAPS)]
+//;     hs = [rng.randint(HLO[i], HHI[i]) for i in range(N_TAPS)]
+//;     return xs, hs
+//; # enddef
+//; VEC = []
+//; def add(xs, hs, en):
+//;     VEC.append((xs, hs, en))
+//; # enddef
+//; # block 0, every gate open: the corners, rebuilt in SV from the vector index up to eight
+//; # taps and from a tabulated mask above that; then every sample code a trim clips; then
+//; # random. It comes first because dotp has no reset: until a tap has clocked once its
+//; # registers are X, and only an open gate clocks one.
+//; if N_TAPS <= 8:
+//;     MASKS = list(range(4 ** N_TAPS))
+//; else:
+//;     MASKS  = [umask(ps, ph) for ps in range(4) for ph in range(4)]
+//;     MASKS += [rng.getrandbits(2 * N_TAPS) for _ in range(4 ** 8)]
+//; # endif
+//; NC = len(MASKS)
+//; for m in MASKS:
+//;     xs, hs = corner(m)
+//;     add(xs, hs, FULL)
+//; # endfor
+//; for i in range(N_TAPS):
+//;     for c in range(XLO, XHI + 1):
+//;         if not SLO[i] <= cvt(c, F_SMPL.frac, F_TRMSMPL[i].frac, TRMSMPL_ROUND) <= SHI[i]:
+//;             xs = [0] * N_TAPS
+//;             xs[i] = c
+//;             add(xs, list(HHI), FULL)
+//;         # endif
+//;     # endfor
+//; # endfor
+//; for _ in range(NRAND):
+//;     xs, hs = rand_vec()
+//;     add(xs, hs, FULL)
+//; # endfor
+//; # one block per further tap_en setting: every gate closed, then each gate open alone. A
+//; # closed gate holds its tap's product, so these blocks check the held value as much as
+//; # the arithmetic; the run below tracks it edge by edge and needs no pad vectors.
+//; SETTINGS = [0] + [1 << i for i in range(N_TAPS)] if N_TAPS > 1 else [0]
+//; for en in SETTINGS:
+//;     for ps in (0, 1):
+//;         for ph in (0, 1):
+//;             xs, hs = corner(umask(ps, ph))
+//;             add(xs, hs, en)
+//;         # endfor
+//;     # endfor
+//;     for _ in range(16):
+//;         xs, hs = rand_vec()
+//;         add(xs, hs, en)
+//;     # endfor
+//; # endfor
+//; NV = len(VEC)
+//; NT = NV - NC
+//; # ------------------------------------------- expected outputs and the derivation check
+//; # Every intermediate must fit its published format, and over the corners from_range of the
+//; # observed extremes must equal it: a width that merely fits is a bound, not a range. Up to
+//; # eight taps the corners put every tap at every operand corner at once, so the sums reach
+//; # both ends too; above that only the per-tap formats are held to equality. The steady
+//; # state is what bounds a format, so this pass uses model(), not the register walk.
+//; SPAN = {}
+//; def span(key, val):
+//;     lo, hi = SPAN.get(key, (val, val))
+//;     SPAN[key] = (min(lo, val), max(hi, val))
+//; # enddef
+//; def fits(what, f, c):
+//;     lo, hi = lo_hi(f)
+//;     if c < lo or c > hi:
+//;         error(f"{mname}: {what} = {c} does not fit the published {f}")
+//;     # endif
+//; # enddef
+//; def tight(what, f, key):
+//;     lo, hi = SPAN[key]
+//;     lsb = Fraction(2) ** -f.frac
+//;     got = qfmt.from_range(lo * lsb, hi * lsb, f.frac, f.signed)
+//;     if got != f:
+//;         error(f"{mname}: {what} is published as {f}; the corners reach {lo} .. {hi}, "
+//;             f"which is {got}")
+//;     # endif
+//; # enddef
+//; for v, (xs, hs, en) in enumerate(VEC):
+//;     s, q, u, t, y = model(xs, hs, en)
+//;     for i in range(N_TAPS):
+//;         fits(f"q[{i}] at vector {v}", Q_PROD_R[i], q[i])
+//;     # endfor
+//;     for g in range(N_GROUPS):
+//;         fits(f"u[{g}] at vector {v}", Q_GROUPS_R[g], u[g])
+//;     # endfor
+//;     fits(f"t at vector {v}", Q_SUM_R, t)
+//;     if v < NC:
+//;         for i in range(N_TAPS):
+//;             span(('q', i), q[i])
+//;         # endfor
+//;         for g in range(N_GROUPS):
+//;             span(('u', g), u[g])
+//;         # endfor
+//;         span(('t', 0), t)
+//;     # endif
+//; # endfor
+//; for i in range(N_TAPS):
+//;     tight(f"Q_PROD[{i}]", Q_PROD_R[i], ('q', i))
+//; # endfor
+//; if N_TAPS <= 8:
+//;     for g in range(N_GROUPS):
+//;         tight(f"Q_GROUPS[{g}]", Q_GROUPS_R[g], ('u', g))
+//;     # endfor
+//;     tight("Q_SUM", Q_SUM_R, ('t', 0))
+//; # endif
+//; # ------------------------------------------------------- the run, edge by edge
+//; # dotp's per-tap registers are clocked by t_clk[i] = clk & tap_en[i], so a tap whose bit
+//; # is clear holds; the group registers run on clk and always take what they see. Walking
+//; # the vectors therefore is the reference, and a pure function of one vector is not. A
+//; # stage is unchecked until it has been written once, since dotp has no reset and starts X.
+//; # The inputs at check point v are what drive() applies: vector v's samples, the
+//; # coefficients of vector v - pipe_trmsmpl so sample and coefficient meet at the
+//; # multiplier, and vector v's tap_en, each held past the last vector.
+//; NCP = NV + LATENCY_SMPL
+//; def run():
+//;     sr, srok = [0] * N_TAPS,   [False] * N_TAPS    # trimmed sample register, per tap
+//;     pr, prok = [0] * N_TAPS,   [False] * N_TAPS    # requantized product register, per tap
+//;     gr, grok = [0] * N_GROUPS, [False] * N_GROUPS  # group sum register
+//;     yr, yrok = 0, False                            # output register
+//;     yexp, chk = [], []
+//;     for v in range(NCP):
+//;         xs  = VEC[v][0] if v < NV else [0] * N_TAPS
+//;         hs  = VEC[min(max(v - pipe_trmsmpl, 0), NV - 1)][1]
+//;         en  = VEC[min(v, NV - 1)][2]
+//;         bit = [(en >> i) & 1 for i in range(N_TAPS)]
+//;         s   = [trim(i, xs[i]) for i in range(N_TAPS)]
+//;         if not TAP_PIPE:
+//;             s = [s[i] if bit[i] else 0 for i in range(N_TAPS)]
+//;         # endif
+//;         if pipe_trmsmpl:
+//;             op, opok = list(sr), list(srok)
+//;         else:
+//;             op, opok = s, [True] * N_TAPS
+//;         # endif
+//;         pc = [prod(i, hs[i], op[i]) for i in range(N_TAPS)]
+//;         if pipe_prod:
+//;             q, qok = list(pr), list(prok)
+//;         else:
+//;             q, qok = pc, opok
+//;         # endif
+//;         u   = [sum(q[i] for i in range(N_TAPS) if GIDX[i] == g) for g in range(N_GROUPS)]
+//;         uok = [all(qok[i] for i in range(N_TAPS) if GIDX[i] == g)
+//;             for g in range(N_GROUPS)]
+//;         if pipe_groups:
+//;             w, wok = gr, grok
+//;         else:
+//;             w, wok = u, uok
+//;         # endif
+//;         t = sum(w)
+//;         y, yok = cvt(t, PROD_FRAC, F_RESULT.frac, RESULT_ROUND, OLO, OHI), all(wok)
+//;         if pipe_result:
+//;             yexp.append(yr)
+//;             chk.append(yrok)
+//;         else:
+//;             yexp.append(y)
+//;             chk.append(yok)
+//;         # endif
+//;         for i in range(N_TAPS):
+//;             if bit[i]:
+//;                 sr[i], srok[i] = s[i], True
+//;                 pr[i], prok[i] = pc[i], opok[i]
+//;             # endif
+//;         # endfor
+//;         gr, grok = list(u), list(uok)
+//;         yr, yrok = y, yok
+//;     # endfor
+//;     return yexp, chk
+//; # enddef
+//; YEXP, CHK = run()
+//; HAS_CHK   = not all(CHK)
+//; if any(abs(y) >= 1 << 31 for y in YEXP):
+//;     error(f"{mname}: an expected output does not fit a 32-bit table literal")
+//; # endif
+//; if not any(CHK):
+//;     error(f"{mname}: no check point has a defined output; the run checks nothing")
+//; # endif
+//; # ------------------------------------------------------------ latency probes
+//; # A sample step and a coefficient step whose effect on y the model says is visible, chosen
+//; # here because a fixed step could land on a trimmed-away or clamped value
+//; H0, H1  = list(HHI), list(HLO)
+//; PY_IDLE = model([0] * N_TAPS, H0, FULL)[4]
+//; def xcand(sm):
+//;     return [XHI if (sm >> i) & 1 else XLO for i in range(N_TAPS)]
+//; # enddef
+//; if N_TAPS <= 8:
+//;     SMS = range(1 << N_TAPS)
+//; else:
+//;     SMS = [0, (1 << N_TAPS) - 1] + [rng.getrandbits(N_TAPS) for _ in range(64)]
+//; # endif
+//; PX, PY0, PY1 = None, None, None
+//; for sm in SMS:
+//;     xs = xcand(sm)
+//;     y0 = model(xs, H0, FULL)[4]
+//;     y1 = model(xs, H1, FULL)[4]
+//;     if PX is None and y0 != PY_IDLE and y1 != y0:
+//;         PX, PY0, PY1 = xs, y0, y1
+//;     # endif
+//; # endfor
+//; if PX is None:
+//;     error(f"{mname}: no sample step moves y in {Q_RESULT}; the latencies cannot be measured")
+//; # endif
+//; # ---------------------------------------------------------------- the tables
+//; rows = [f"yexp[{v}] = {y};" for v, y in enumerate(YEXP)]
+//; for v in range(NC, NV):
+//;     xs, hs = VEC[v][0], VEC[v][1]
+//;     rows += [f"xtab[{(v - NC) * N_TAPS + i}] = {xs[i]};" for i in range(N_TAPS)]
+//;     rows += [f"htab[{(v - NC) * N_TAPS + i}] = {hs[i]};" for i in range(N_TAPS)]
+//; # endfor
+//; rows += [f"cmask[{v}] = {m};" for v, m in enumerate(MASKS)] if N_TAPS > 8 else []
+//; rows += [f"chk[{v}] = 1'b0;" for v in range(NCP) if not CHK[v]] if HAS_CHK else []
+//; rows += [f"ent[{v}] = {N_TAPS}'d{VEC[v][2]};" for v in range(NV)]
+//; CH     = 4096
+//; CHUNKS = [rows[i:i + CH] for i in range(0, len(rows), CH)]
+//; XW     = F_SMPL.width
+module `mname`;
+
+//; include('tb_util.svpy')
+
+//; # a one-element unpacked array cannot be connected under Icarus 12, so dotp declares a
+//; # plain port at N_TAPS=1 and the testbench matches it. Above that the port takes the
+//; # array, but the vectors are driven into one variable per tap, which continuous
+//; # assignments gather: verilator 5.020 raises no event for a procedural write to an
+//; # element of an unpacked array, so a design node that reads only the array -- a trimmed
+//; # sample, with nothing else in its cone -- keeps the value it took at time zero.
+//; def sample_elem(i):
+//;     return 'sample' if N_TAPS == 1 else idx('sample', i, N_TAPS, IDX_W)
+//; # enddef
+//; def coef(i):
+//;     return idx('coef', i, N_TAPS, IDX_W)
+//; # enddef
+//; if N_TAPS == 1:
+    logic `decl(F_SMPL)` sample;
+//; else:
+//;     for i in range(N_TAPS):
+    logic `decl(F_SMPL)` `sample_elem(i)`;
+//;     # endfor
+    wire  `decl(F_SMPL)` sample [0:`N_TAPS-1`];
+//;     for i in range(N_TAPS):
+    assign sample[`i`] = `sample_elem(i)`;
+//;     # endfor
+//; # endif
+//; for i in range(N_TAPS):
+    logic `decl(F_COEF[i])` `coef(i)`;
+//; # endfor
+    logic [`N_TAPS-1`:0] tap_en;
+    wire  `decl(F_RESULT)` result;
+    logic clk = 1'b0;
+//; if CLK:
+
+    always #5 clk = ~clk;
+//; # endif
+
+//; conns  = ['.result(result)', '.sample(sample)']
+//; conns += [f'.{coef(i)}({coef(i)})' for i in range(N_TAPS)]
+//; conns += ['.tap_en(tap_en)']
+//; conns += ['.clk(clk)']
+    `dut.instantiate()` (
+        `', '.join(conns)`
+    );
+
+    // expected output per check point; the inputs of the vectors not rebuilt from their index
+    longint yexp [0:`NCP-1`];
+//; if NT:
+    longint xtab [0:`NT*N_TAPS-1`];
+    longint htab [0:`NT*N_TAPS-1`];
+//; # endif
+//; if N_TAPS > 8:
+    longint cmask [0:`NC-1`];
+//; # endif
+//; if HAS_CHK:
+    bit     chk  [0:`NCP-1`];
+//; # endif
+    logic [`N_TAPS-1`:0] ent [0:`NV-1`];
+    longint tmp, m;
+    int     hv, ev, n;
+
+//; for ci, ch in enumerate(CHUNKS):
+    task load_`ci`;
+        begin
+//;     for r in ch:
+            `r`
+//;     # endfor
+        end
+    endtask
+
+//; # endfor
+    task load_tables;
+        begin
+//; if HAS_CHK:
+            for (int i = 0; i < `NCP`; i++) chk[i] = 1'b1;
+//; # endif
+//; for ci in range(len(CHUNKS)):
+            load_`ci`;
+//; # endfor
+        end
+    endtask
+
+    // vector v: its samples, its tap_en, and the coefficients of vector v, or of vector v-1
+    // when PIPE registers the trimmed samples, so that sample and coefficient meet at the
+    // multiplier. Past the last vector the samples go to zero and the rest holds.
+    task drive(input int v);
+        begin
+            if (v < `NC`) begin
+                m = `"longint'(v)" if N_TAPS <= 8 else 'cmask[v]'`;
+//; for i in range(N_TAPS):
+                tmp = m[`2 * i`] ? `XHI` : `XLO`;
+                `sample_elem(i)` = tmp[`XW-1`:0];
+//; # endfor
+            end
+//; if NT:
+            else if (v < `NV`) begin
+//;     for i in range(N_TAPS):
+                tmp = xtab[(v - `NC`) * `N_TAPS` + `i`];
+                `sample_elem(i)` = tmp[`XW-1`:0];
+//;     # endfor
+            end
+//; # endif
+            else begin
+//; for i in range(N_TAPS):
+                tmp = 0;
+                `sample_elem(i)` = tmp[`XW-1`:0];
+//; # endfor
+            end
+            hv = v - `pipe_trmsmpl`;
+            if (hv < 0) hv = 0;
+            if (hv > `NV-1`) hv = `NV-1`;
+            if (hv < `NC`) begin
+                m = `"longint'(hv)" if N_TAPS <= 8 else 'cmask[hv]'`;
+//; for i in range(N_TAPS):
+                tmp = m[`2 * i + 1`] ? `HHI[i]` : `HLO[i]`;
+                `coef(i)` = tmp[`F_COEF[i].width-1`:0];
+//; # endfor
+            end
+//; if NT:
+            else begin
+//;     for i in range(N_TAPS):
+                tmp = htab[(hv - `NC`) * `N_TAPS` + `i`];
+                `coef(i)` = tmp[`F_COEF[i].width-1`:0];
+//;     # endfor
+            end
+//; # endif
+            ev = v;
+            if (ev > `NV-1`) ev = `NV-1`;
+            tap_en = ent[ev];
+        end
+    endtask
+
+    // the latency probes: samples at zero or at PX, coefficients at H0 or H1, gates open
+    task drive_probe(input bit step_x, input bit step_h);
+        begin
+//; for i in range(N_TAPS):
+            tmp = step_x ? `PX[i]` : 0;
+            `sample_elem(i)` = tmp[`XW-1`:0];
+//; # endfor
+//; for i in range(N_TAPS):
+            tmp = step_h ? `H1[i]` : `H0[i]`;
+            `coef(i)` = tmp[`F_COEF[i].width-1`:0];
+//; # endfor
+            tap_en = {`N_TAPS`{1'b1}};
+        end
+    endtask
+
+    // one clock edge: from the drive point at a negedge, through the posedge, to the next
+    // negedge. Without a clock a delay stands in for the edge, so the same loops run.
+    task step;
+        begin
+//; if CLK:
+            @(posedge clk);
+            @(negedge clk);
+//; else:
+            #4;
+//; # endif
+        end
+    endtask
+
+    // check 3: clock edges from a sample step to result, then from a coefficient step to
+    // result, counted rather than assumed. A step is applied at the drive point and result
+    // is read #1 later, so a combinational path counts zero. The counts stop at
+    // LATENCY_SMPL + 3 so a dead design fails the check instead of hanging.
+    task probe_latency;
+        begin
+            drive_probe(1'b0, 1'b0);
+            repeat (`LATENCY_SMPL + 2`) step;
+            #1;
+            tb_check(64'(result), `PY_IDLE`, "probe: idle output");
+            drive_probe(1'b1, 1'b0);
+            #1;
+            n = 0;
+            while (64'(result) !== `PY0` && n < `LATENCY_SMPL + 3`) begin
+                step;
+                #1;
+                n = n + 1;
+            end
+            tb_check(64'(n), `LATENCY_SMPL`, "LATENCY_SMPL: edges from sample to result");
+            drive_probe(1'b1, 1'b1);
+            #1;
+            n = 0;
+            while (64'(result) !== `PY1` && n < `LATENCY_COEF + 3`) begin
+                step;
+                #1;
+                n = n + 1;
+            end
+            tb_check(64'(n), `LATENCY_COEF`, "LATENCY_COEF: edges from coef to result");
+        end
+    endtask
+
+    initial begin
+        $display("  dotp: N_TAPS=`N_TAPS` TAP_GROUPS=`','.join(str(g) for g in TAP_GROUPS)`");
+        $display("  dotp: PROD_FRAC=`PROD_FRAC`");
+        $display("  dotp: Q_PROD=`dut.get_param('Q_PROD')` Q_GROUPS=`dut.get_param('Q_GROUPS')`");
+        $display("  dotp: Q_SUM=`dut.get_param('Q_SUM')`");
+        $display("  dotp: PIPE=`','.join(PIPE) if PIPE else 'none'`");
+        $display("  dotp: LATENCY_SMPL=`LATENCY_SMPL` LATENCY_COEF=`LATENCY_COEF`");
+        $display("  vectors: %0d, %0d corners, %0d tabulated", `NV`, `NC`, `NT`);
+        load_tables;
+//; if CLK:
+        @(negedge clk);
+//; # endif
+        // check point v: the inputs of vector v are applied at a negedge and result is read
+        // #1 later, before the next edge, so it shows the registers as v edges left them.
+        // yexp is indexed by check point, not by vector: a held tap breaks the fixed
+        // pipeline delay that would let one stand in for the other. The run continues
+        // LATENCY_SMPL points past the last vector to flush it.
+        for (int v = 0; v < `NCP`; v++) begin
+            drive(v);
+            #1;
+//; if HAS_CHK:
+            if (chk[v]) tb_check(64'(result), yexp[v], $sformatf("check point %0d", v));
+//; else:
+            tb_check(64'(result), yexp[v], $sformatf("check point %0d", v));
+//; # endif
+            step;
+        end
+        probe_latency;
+        tb_report("`CFG`");
+        $finish;
+    end
+endmodule

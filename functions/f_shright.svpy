@@ -23,7 +23,7 @@
             inx = `sext('in', iwidth, isw)`;
 
             // scale by 4+frac up front, so the shift below is the only truncation
-            case (frac) // synthesis parallel_case full_case
+            case (frac)
                 2'd0: scaled =  inx << 2;
                 2'd1: scaled = (inx << 2) + inx;
                 2'd2: scaled = (inx << 2) + (inx << 1);
@@ -43,7 +43,7 @@
             udf =  udf | in[`iwidth-1`] & ( scaled[`iwidth-1`:0] == `lit(shr_minn, iwidth)` );
 //; # endif
 
-            case ( {ovf, udf} ) // synthesis parallel_case full_case
+            case ( {ovf, udf} )
                 2'b10:   `func_name` = `lit(shr_max, iwidth)`;
 //; if osym:
                 2'b01:   `func_name` = `lit(shr_minn+1, iwidth)`;

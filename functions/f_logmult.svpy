@@ -38,7 +38,7 @@
         reg                         zero;
         begin
             zero = (a == `lit(0, awidth, signed=False)`) || (b == `lit(0, bwidth, signed=False)`);
-            case ( { a[`awidth-1`], b[`bwidth-1`] } ) // synthesis full_case parallel_case
+            case ( { a[`awidth-1`], b[`bwidth-1`] } )
                 2'b01,
                 2'b10:   `func_name` = zero ? 2'b00 : 2'b11;
                 default: `func_name` = zero ? 2'b00 : 2'b01;
