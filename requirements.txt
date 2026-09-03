@@ -1,0 +1,5 @@
+# make test needs pytest; make plot and verif/plot.py need matplotlib;
+# the generator itself is genesispy.
+pytest
+matplotlib>=3.9
+genesispy>=0.6

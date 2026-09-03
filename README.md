@@ -5,22 +5,22 @@ Fixed-point DSP building blocks for hardware, using
 
 ## Requirements
 
-The genesispy generator, which comes with the repository as a submodule at `ext/genesispy`.
-`source 0.setup.sh` puts it on `PATH`.
+The genesispy generator, installed from PyPI along with the Python packages the make targets need:
 
 ```sh
-git clone --recurse-submodules git@github.com:stfns-s/dsp-gpy.git
-source 0.setup.sh
+git clone git@github.com:stfns-s/dsp-gpy.git
+cd dsp-gpy
+pip install -r requirements.txt
 ```
 
-An existing clone populates the submodule with `git submodule update --init ext/genesispy`.
-
-`0.setup.sh` takes the first of three: `${GENESISPY_HOME}/bin`, a `genesispy` already on `PATH`,
-and `ext/genesispy/bin`. To use a checkout of your own instead of the submodule:
+That puts `genesispy` on `PATH` in the environment you installed it into. `0.setup.sh` is needed
+only to use a checkout of your own instead:
 
 ```sh
 GENESISPY_HOME=/path/to/genesispy source 0.setup.sh
 ```
+
+It takes the first of two: `${GENESISPY_HOME}/bin`, then a `genesispy` already on `PATH`.
 
 The rest are the tools the make targets run:
 
@@ -28,7 +28,7 @@ The rest are the tools the make targets run:
 - `verilator`: `make test-extra`, `make test-smoke`, `make plot`, `vlint-tb`, and `vlint` by default
 - `xrun`, `vcs`, `vlog`: optional; `make sim SIMULATOR=<name>` drives them too
 - `pytest`: the `lib/` tests
-- matplotlib: `verif/plot.py`, installed with `pip install -r verif/requirements.txt`
+- matplotlib: `verif/plot.py`, installed with `pip install -r requirements.txt`
 
 ## Documentation
 
@@ -57,7 +57,6 @@ verif/
   run-tb.sh       generate, build and run one testbench in one configuration
   plot.py         plot a data file
 doc/              the four documents above
-ext/genesispy/    the genesispy generator, a submodule
 build/            everything generated; not in git
 ```
 

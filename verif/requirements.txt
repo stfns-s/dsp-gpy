@@ -1,3 +1,0 @@
-# make test needs pytest; make plot and verif/plot.py need matplotlib.
-pytest
-matplotlib>=3.9

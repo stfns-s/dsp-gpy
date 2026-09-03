@@ -107,4 +107,4 @@ verif/plot.py build/tb_f_shright/IW8_CW2/verilator/data.csv --key frac=3 --out s
 
 `run-tb.sh` takes `-data` to write the file and `-plot` to write it and open the plot. Neither
 works with `gen`, which runs no simulator, and nor does `-dump`. Plotting needs matplotlib, which
-`make test` does not import: `pip install -r verif/requirements.txt`.
+`make test` does not import: `pip install -r requirements.txt`.

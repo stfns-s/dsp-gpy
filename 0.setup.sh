@@ -6,8 +6,8 @@
 #
 #   1. "${GENESISPY_HOME}/bin", when GENESISPY_HOME is set; it names a checkout root
 #   2. a genesispy already on PATH, which is left as it is
-#   3. "ext/genesispy/bin", the submodule beside this script
 #
+# `pip install -r requirements.txt` installs the generator, which covers case 2.
 # Point at a checkout of your own with:
 #
 #     GENESISPY_HOME=/path/to/genesispy source 0.setup.sh
@@ -32,17 +32,13 @@ _vpy_setup() {
         fi
     else
         found="$(command -v genesispy 2>/dev/null)"
-        if [[ -n "${found}" ]]; then
-            echo "genesispy already on PATH: ${found}"
-            return 0
-        fi
-
-        bindir="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ext/genesispy/bin"
-        if [[ ! -x "${bindir}/genesispy" ]]; then
-            echo "0.setup.sh: no genesispy on PATH, and none at ${bindir}" >&2
-            echo "0.setup.sh: run 'git submodule update --init ext/genesispy', or set GENESISPY_HOME" >&2
+        if [[ -z "${found}" ]]; then
+            echo "0.setup.sh: no genesispy on PATH, and GENESISPY_HOME is not set" >&2
+            echo "0.setup.sh: run 'pip install -r requirements.txt', or set GENESISPY_HOME" >&2
             return 1
         fi
+        echo "genesispy already on PATH: ${found}"
+        return 0
     fi
 
     case ":${PATH}:" in

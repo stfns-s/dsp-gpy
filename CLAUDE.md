@@ -5,11 +5,13 @@ file covers what not to do.
 
 ## Environment
 
-`genesispy` is not on PATH by default. Run `source 0.setup.sh` from the repository root in each new
-shell before invoking `make` or `verif/run-tb.sh`. It takes the first of three:
-`${GENESISPY_HOME}/bin`, a `genesispy` already on `PATH`, and the `ext/genesispy` submodule. An
-empty `ext/genesispy` means the submodule was never populated;
-`git submodule update --init ext/genesispy` fills it.
+`genesispy` comes from `pip install -r requirements.txt`, which puts it on `PATH` in the
+environment you installed it into. Check with `command -v genesispy` before invoking `make` or
+`verif/run-tb.sh`; if it is missing, the install did not reach the active environment.
+
+`source 0.setup.sh` is needed only to use a checkout of your own instead of the installed
+generator. It takes the first of two: `${GENESISPY_HOME}/bin`, then a `genesispy` already on
+`PATH`.
 
 ## Verification
 
